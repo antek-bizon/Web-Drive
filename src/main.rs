@@ -1,6 +1,7 @@
 use std::env;
 
-use actix_web::{web, App, HttpServer};
+use actix_cors::Cors;
+use actix_web::{http::header, web, App, HttpServer};
 use dotenv::dotenv;
 use env_logger::Builder;
 use sqlx::{mysql::MySqlPoolOptions, MySql, Pool};
@@ -29,17 +30,25 @@ async fn main() -> std::io::Result<()> {
 
     log::info!("Starting server {} on port {}", server_ip, port);
     HttpServer::new(move || {
+        let cors = Cors::default()
+            .allow_any_origin()
+            .allowed_methods(vec!["GET", "POST"])
+            .allowed_headers(vec![header::ACCEPT, header::CONTENT_TYPE])
+            .supports_credentials();
+
         App::new()
+            .wrap(cors)
             .app_data(web::Data::new(AppState {
                 db: pool.clone(),
                 secret_key: secret_key.clone(),
             }))
             .service(
-                web::scope("/api")
-                    .service(ping)
-                    .service(register_user)
-                    .service(confirm_user)
-                    .service(login_user),
+                web::scope("/api").service(ping).service(
+                    web::scope("/user")
+                        .service(register_user)
+                        .service(confirm_user)
+                        .service(login_user),
+                ),
             )
     })
     .workers(1)
@@ -56,6 +65,7 @@ pub struct AppState {
 mod controller {
     use crate::AppState;
     use actix_web::{
+        cookie::{time::Duration, Cookie, SameSite},
         get,
         http::header::ContentType,
         post,
@@ -86,10 +96,9 @@ mod controller {
         pub password: String,
     }
     #[derive(Serialize, FromRow)]
-    struct UserWithToken {
+    struct AfterLoginInfo {
         email: String,
         nick: String,
-        token: String,
     }
 
     #[get("/ping")]
@@ -98,7 +107,7 @@ mod controller {
         HttpResponse::Ok().body("Successfully pinged!")
     }
 
-    #[post("/user/register")]
+    #[post("/register")]
     pub async fn register_user(
         body: Json<CreateUserBody>,
         state: Data<AppState>,
@@ -134,7 +143,7 @@ mod controller {
         }
     }
 
-    #[post("/user/confirm")]
+    #[post("/confirm")]
     pub async fn confirm_user(
         body: Json<ConfirmUserBody>,
         state: Data<AppState>,
@@ -180,7 +189,7 @@ mod controller {
         }
     }
 
-    #[post("/user/login")]
+    #[post("/login")]
     pub async fn login_user(body: Json<LoginUserBody>, state: Data<AppState>) -> impl Responder {
         log::trace!("{:?}", body);
 
@@ -204,15 +213,24 @@ mod controller {
                     &EncodingKey::from_secret(state.secret_key.as_bytes()),
                 );
                 if let Ok(token) = encode_token {
-                    log::info!("{:?}", token);
+                    log::trace!("{:?}", token);
 
-                    let data = UserWithToken {
+                    let data = AfterLoginInfo {
                         email: user.email,
                         nick: user.nick,
-                        token,
                     };
+
+                    let cookie_token = Cookie::build("token", token)
+                        // .secure(true)
+                        .path("/")
+                        .http_only(true)
+                        .same_site(SameSite::Strict)
+                        .max_age(Duration::minutes(60))
+                        .finish();
+
                     return HttpResponse::Ok()
                         .content_type(ContentType::json())
+                        .cookie(cookie_token)
                         .json(data);
                 }
 
